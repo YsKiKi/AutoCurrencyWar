@@ -19,7 +19,7 @@ from typing import Callable, List, Optional
 
 from PIL import Image
 from PyQt6.QtCore import Qt, QStringListModel, QSortFilterProxyModel, pyqtSignal, QRect
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
     QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -27,6 +27,87 @@ from PyQt6.QtWidgets import (
     QSpinBox, QGroupBox, QCompleter, QStatusBar,
     QFileDialog, QMessageBox, QDialog,
 )
+
+# Qt Key → keyboard 库键名映射
+_QT_KEY_TO_KB: dict[int, str] = {
+    Qt.Key.Key_F1: "f1", Qt.Key.Key_F2: "f2", Qt.Key.Key_F3: "f3",
+    Qt.Key.Key_F4: "f4", Qt.Key.Key_F5: "f5", Qt.Key.Key_F6: "f6",
+    Qt.Key.Key_F7: "f7", Qt.Key.Key_F8: "f8", Qt.Key.Key_F9: "f9",
+    Qt.Key.Key_F10: "f10", Qt.Key.Key_F11: "f11", Qt.Key.Key_F12: "f12",
+    Qt.Key.Key_Escape: "esc", Qt.Key.Key_Tab: "tab",
+    Qt.Key.Key_Backspace: "backspace", Qt.Key.Key_Return: "enter",
+    Qt.Key.Key_Enter: "enter", Qt.Key.Key_Insert: "insert",
+    Qt.Key.Key_Delete: "delete", Qt.Key.Key_Home: "home",
+    Qt.Key.Key_End: "end", Qt.Key.Key_PageUp: "page up",
+    Qt.Key.Key_PageDown: "page down",
+    Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down",
+    Qt.Key.Key_Left: "left", Qt.Key.Key_Right: "right",
+    Qt.Key.Key_Space: "space", Qt.Key.Key_Pause: "pause",
+    Qt.Key.Key_Print: "print screen", Qt.Key.Key_ScrollLock: "scroll lock",
+    Qt.Key.Key_CapsLock: "caps lock", Qt.Key.Key_NumLock: "num lock",
+}
+
+
+class HotkeyEdit(QLineEdit):
+    """
+    点击后捕获用户按下的键盘组合，支持 Ctrl/Alt/Shift+单键 或单独按键。
+    显示文本为 keyboard 库兼容的格式（如 "ctrl+shift+f1"、"delete"）。
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setReadOnly(True)
+        self.setPlaceholderText("点击此处，然后按下快捷键…")
+        self._listening = False
+
+    def mousePressEvent(self, event):
+        self._listening = True
+        self.setText("请按下快捷键…")
+        self.setFocus()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if not self._listening:
+            return
+        key = event.key()
+        # 忽略单独的修饰键按下（等待组合键）
+        if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            return
+
+        parts: list[str] = []
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            parts.append("ctrl")
+        if mods & Qt.KeyboardModifier.AltModifier:
+            parts.append("alt")
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            parts.append("shift")
+
+        # 将 Qt Key 转换为 keyboard 库键名
+        if key in _QT_KEY_TO_KB:
+            key_name = _QT_KEY_TO_KB[key]
+        else:
+            text = event.text().strip().lower()
+            if text and text.isprintable():
+                key_name = text
+            else:
+                # 尝试从 QKeySequence 获取
+                seq = QKeySequence(key).toString().lower()
+                key_name = seq if seq else f"unknown({key})"
+
+        parts.append(key_name)
+        hotkey_str = "+".join(parts)
+
+        self.setText(hotkey_str)
+        self._listening = False
+
+    def focusOutEvent(self, event):
+        if self._listening:
+            self._listening = False
+            # 如果用户没有按键就失去焦点，恢复原值或置空
+            if self.text() == "请按下快捷键…":
+                self.setText("delete")
+        super().focusOutEvent(event)
 
 
 class _StopSignalHelper(QWidget):
@@ -357,7 +438,7 @@ class CurrencyWarGUI:
         hk_group = QGroupBox("快捷键配置")
         hk_form = QFormLayout(hk_group)
 
-        self._stop_key_edit = QLineEdit("delete")
+        self._stop_key_edit = HotkeyEdit("delete")
         hk_form.addRow("停止作业快捷键:", self._stop_key_edit)
 
         tab_hk_layout.addWidget(hk_group)
