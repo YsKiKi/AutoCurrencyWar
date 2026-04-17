@@ -16,29 +16,27 @@ HSR「货币战争」自动刷取工具。通过 PaddleOCR 识别投资环境与
 - **PyQt6 GUI**：搜索联想选择策略/Debuff、框选识别区域、快捷键捕获
 - **快捷键停止**：支持自定义组合键（Ctrl/Alt/Shift+键 或单键）
 
-### 使用
+### 开始使用
 
-#### 下载最新版本
-- 访问 [Releases](https://github.com/YsKiKi/AutoCurrencyWar/releases/latest) 下载最新版本
+> [!IMPORTANT]
+> - 本工具中的button图片为2560x1440分辨率截图，其他分辨率请自行截图替换 `res/buttons/` 目录下对应的图片
+> - 请勿修改对应的图片命名，否则程序将无法识别按钮状态
+
+克隆仓库到本地  
+```bash
+git clone https://github.com/YsKiKi/AutoCurrencyWar.git
+```
 
 #### 运行流程
-1. 解压后运行 `CurrencyWar.exe`
+1. 双击 `start.bat` 启动程序，或在安装环境后直接运行 `python main.py`
 2. 选择目标策略和Debuff
 3. 切换标签页，设置OCR识别次数，框选识别区域，配置快捷键
 4. 启动！
 
-#### 自行构建
-将此项目克隆到本地，安装依赖后运行 `build.py` 进行构建：
-
-```bash
-python build.py
-```
-
-输出 `dist/CurrencyWar/` 目录，可直接运行 `CurrencyWar.exe`。
-
 
 > [!NOTE]
 > - 程序启动时会自动请求管理员权限（UAC），HSR为高权限窗口，必须以管理员权限运行才能正确截图和点击
+> - 需要自行安装Python环境，推荐使用Python 3.10或以上版本
 > - 需要先启动HSR并进入货币战争界面
 > - OCR 识别区域需根据实际分辨率通过 GUI 框选调整
 > - 首次运行会自动下载 PaddleOCR 模型至 `res/ocr/`

@@ -9,6 +9,7 @@ dist/
 build/
 .eggs/
 *.spec
+*.svg
 
 # 虚拟环境
 .venv/

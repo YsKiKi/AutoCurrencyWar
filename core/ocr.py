@@ -41,10 +41,9 @@ class OCREngine:
     封装 PaddleOCR，提供中文识别、文字定位等功能。
 
     :param lang: 识别语言，"ch" 支持中英混合，"en" 仅英文。
-    :param use_gpu: 是否使用 GPU 加速（需安装 paddlepaddle-gpu）。
     """
 
-    def __init__(self, lang: str = "ch", use_gpu: bool = True) -> None:
+    def __init__(self, lang: str = "ch") -> None:
         try:
             from paddleocr import PaddleOCR
         except ImportError as exc:
@@ -52,58 +51,15 @@ class OCREngine:
                 "PaddleOCR 未安装，请执行：pip install paddlepaddle paddleocr"
             ) from exc
 
-        # GPU 可用性诊断
-        if use_gpu:
-            self._log_gpu_status()
-
-        self._ocr = self._init_ocr(PaddleOCR, lang, use_gpu)
-
-    @staticmethod
-    def _log_gpu_status() -> None:
-        """检查并记录 PaddlePaddle GPU 可用性。"""
-        try:
-            import paddle
-            compiled = paddle.device.is_compiled_with_cuda()
-            count = paddle.device.cuda.device_count() if compiled else 0
-            if compiled and count > 0:
-                gpu_name = paddle.device.cuda.get_device_name(0)
-                logger.info("Paddle GPU 可用：%s（共 %d 设备）", gpu_name, count)
-            elif compiled:
-                logger.warning("Paddle 编译了 CUDA 但未检测到 GPU 设备。")
-            else:
-                logger.warning(
-                    "当前 paddlepaddle 为 CPU 版本，无法使用 GPU。"
-                    "如需 GPU 加速，请安装 paddlepaddle-gpu。"
-                )
-        except Exception as e:
-            logger.warning("GPU 状态检查失败：%s", e)
-
-    def _init_ocr(self, PaddleOCR, lang: str, use_gpu: bool):
-        """初始化 PaddleOCR，GPU 失败时自动降级到 CPU。"""
-        def _build(gpu: bool):
-            return PaddleOCR(
-                lang=lang,
-                device="gpu" if gpu else "cpu",
-                ocr_version="PP-OCRv4",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-            )
-
-        if use_gpu:
-            try:
-                ocr = _build(True)
-                logger.info("OCREngine 初始化完成（lang=%s, device=gpu）", lang)
-                return ocr
-            except Exception as e:
-                logger.warning(
-                    "GPU 初始化失败（%s: %s），自动降级到 CPU。",
-                    type(e).__name__, e,
-                )
-
-        ocr = _build(False)
+        self._ocr = PaddleOCR(
+            lang=lang,
+            device="cpu",
+            ocr_version="PP-OCRv4",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
         logger.info("OCREngine 初始化完成（lang=%s, device=cpu）", lang)
-        return ocr
 
     # ------------------------------------------------------------------
     # 核心识别

@@ -39,7 +39,12 @@ except Exception:
 
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 # PaddleX 模型缓存目录放在项目 res/ocr 下
-os.environ["PADDLEX_HOME"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "res", "ocr")
+# 兼容 PyInstaller 打包后的路径
+if getattr(sys, "frozen", False):
+    _base = os.path.dirname(sys._MEIPASS)  # type: ignore[attr-defined]  # res/ 与 _internal/ 同级
+else:
+    _base = os.path.dirname(os.path.abspath(__file__))
+os.environ["PADDLEX_HOME"] = os.path.join(_base, "res", "ocr")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,8 +69,8 @@ def _init_components():
     logger.info("找到窗口：%s", window)
     window.focus_window()
 
-    logger.info("初始化 OCR 引擎（中文模式，GPU 加速）…")
-    ocr = OCREngine(lang="ch", use_gpu=True)
+    logger.info("初始化 OCR 引擎（中文模式）…")
+    ocr = OCREngine(lang="ch")
 
     matcher = ImageMatcher(threshold=0.85)
     return window, ocr, matcher
