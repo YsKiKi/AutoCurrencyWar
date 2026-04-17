@@ -1,1 +1,2 @@
-# GUI 模块（预留）
+# GUI 模块
+from gui.app import CurrencyWarGUI

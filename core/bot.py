@@ -8,8 +8,7 @@ bot.py
     阶段二 → 识别并选择投资环境
     阶段三 → 若非目标则退出重置，否则提醒用户并结束
 
-目标投资环境：长线利好 / 轮岗
-退出热键：DEL
+退出热键：可配置（默认 DEL）
 """
 
 from __future__ import annotations
@@ -23,12 +22,10 @@ from typing import List, Optional, Set
 
 import keyboard
 
+from core.config import AppConfig, load_name_list
 from core.overlay import COLOR_MATCH, COLOR_OCR, COLOR_TARGET, Mark, ScreenOverlay
 
 logger = logging.getLogger(__name__)
-
-# 目标投资环境关键词
-_TARGET_ENVS: frozenset[str] = frozenset({"长线利好", "轮岗"})
 
 # 超时常量（秒）
 _TIMEOUT_LONG: float = 90.0   # 等待主要按钮
@@ -40,29 +37,6 @@ _MAX_RETRIES: int = 3          # 点击失败最大重试次数
 _SCENE_LOAD_DELAY: float = 4.0 # 场景切换后等待界面加载完成的延迟
 
 
-# 投资环境界面扫描区域
-_ENV_Y: int = 490
-_ENV_H: int = 55   # 490~545
-
-# 策略验证：至少连续比对成功次数
-_MIN_CONFIRM_ROUNDS: int = 5
-
-
-def _load_strategies(path: str = "res/strategy.txt") -> Set[str]:
-    """从文件加载所有合法投资策略名称。"""
-    strategies: Set[str] = set()
-    if not os.path.isfile(path):
-        logger.warning("策略文件不存在：%s", path)
-        return strategies
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            name = line.strip()
-            if name:
-                strategies.add(name)
-    logger.info("已加载 %d 个合法投资策略", len(strategies))
-    return strategies
-
-
 class CurrencyWarBot:
     """
     货币战争自动化机器人。
@@ -72,13 +46,20 @@ class CurrencyWarBot:
     :param matcher: ImageMatcher 实例
     """
 
-    def __init__(self, window, ocr, matcher) -> None:
+    def __init__(self, window, ocr, matcher, config: Optional[AppConfig] = None) -> None:
         self.window = window
         self.ocr = ocr
         self.matcher = matcher
+        self.config = config or AppConfig()
         self._stop_event = threading.Event()
         self.overlay: Optional[ScreenOverlay] = None
-        self._strategies: Set[str] = _load_strategies()
+        self._last_debuffs: List[str] = []  # 最近一次扫描到的 Debuff
+
+        # 从 txt 文件加载所有合法名称（用于 OCR 匹配验证）
+        self._strategies: Set[str] = set(load_name_list("res/strategy.txt"))
+        self._debuffs: Set[str] = set(load_name_list("res/debuff.txt"))
+        logger.info("已加载 %d 个合法投资策略, %d 个已知Debuff",
+                     len(self._strategies), len(self._debuffs))
 
     # ------------------------------------------------------------------
     # 控制接口
@@ -259,6 +240,29 @@ class CurrencyWarBot:
         self._clear_marks()
         return False
 
+    def _wait_for_image(
+        self,
+        path: str,
+        timeout: float = _TIMEOUT_LONG,
+    ) -> bool:
+        """轮询截图，等待模板图像出现（不点击），返回是否找到。"""
+        label = os.path.splitext(os.path.basename(path))[0]
+        deadline = time.time() + timeout
+        while time.time() < deadline and not self._stopped():
+            self._reposition_overlay()
+            img = self._shot()
+            match = self.matcher.find(img, path)
+            if match:
+                self._mark_match(match, label=label)
+                self._olog(f"检测到图像 [{label}]")
+                logger.info("检测到图像 %r  坐标=%s", path, match.center)
+                return True
+            time.sleep(_POLL)
+        if not self._stopped():
+            self._olog(f"超时：图像 [{label}] 未出现")
+            logger.warning("超时：图像 %r 未出现", path)
+        return False
+
     # ------------------------------------------------------------------
     # 屏幕元素步骤检测
     # ------------------------------------------------------------------
@@ -268,7 +272,7 @@ class CurrencyWarBot:
         ("res/buttons/开始货币战争.png", "主界面 → 开始货币战争"),
         ("res/buttons/进入标准博弈.png", "选择模式 → 进入标准博弈"),
         ("res/buttons/开始对局.png",     "准备对局 → 开始对局"),
-        ("res/buttons/下一步.png",       "过场 → 下一步"),
+        ("res/buttons/下一步.png",       "过场 → 下一步（Debuff扫描中）"),
         ("res/buttons/点击空白处继续.png", "过场 → 点击空白处继续"),
         ("res/buttons/refresh.png",      "投资环境选择界面"),
         ("res/buttons/确认.png",         "确认投资环境"),
@@ -283,7 +287,7 @@ class CurrencyWarBot:
         """通过当前屏幕中存在的 UI 元素推断当前所处步骤。"""
         img = self._shot()
         for path, step_desc in self._STEP_INDICATORS:
-            if not os.path.isfile(path):
+            if not path or not os.path.isfile(path):
                 continue
             match = self.matcher.find(img, path, threshold=0.80)
             if match:
@@ -303,22 +307,43 @@ class CurrencyWarBot:
     def _phase1(self) -> bool:
         """
         依次点击（图像模板匹配）：
-          开始货币战争 → 进入标准博弈 → 开始对局 → 下一步 → 点击空白处继续
+          开始货币战争 → 进入标准博弈 → 开始对局 → [等待下一步出现→检测Debuff→点击下一步] → 点击空白处继续
         """
-        steps = [
-            ("res/buttons/开始货币战争.png", "阶段一 [1/5] 开始货币战争"),
-            ("res/buttons/进入标准博弈.png", "阶段一 [2/5] 进入标准博弈"),
-            ("res/buttons/开始对局.png",     "阶段一 [3/5] 开始对局"),
-            ("res/buttons/下一步.png",       "阶段一 [4/5] 下一步"),
-            ("res/buttons/点击空白处继续.png", "阶段一 [5/5] 点击空白处继续"),
+        pre_steps = [
+            ("res/buttons/开始货币战争.png", "阶段一 [1/6] 开始货币战争"),
+            ("res/buttons/进入标准博弈.png", "阶段一 [2/6] 进入标准博弈"),
+            ("res/buttons/开始对局.png",     "阶段一 [3/6] 开始对局"),
         ]
         logger.info("----- 阶段一：进入货币战争流程 -----")
         self._olog("----- 阶段一：进入货币战争 -----")
-        for img_path, step_desc in steps:
+        for img_path, step_desc in pre_steps:
             if self._stopped():
                 return False
             self._ostep(step_desc)
             if not self._wait_and_click_image(img_path):
+                return False
+
+        # Step 4/6: 等待「下一步」按钮出现后进行Debuff稳定扫描，再点击下一步
+        if not self._stopped():
+            self._ostep("阶段一 [4/6] 等待下一步 & 扫描Debuff")
+            if not self._wait_for_image("res/buttons/下一步.png"):
+                self._olog("等待下一步超时")
+                return False
+            self._last_debuffs = self._stable_scan_debuffs()
+            if not self._last_debuffs and not self._stopped():
+                self._olog("Debuff扫描失败，继续流程")
+                logger.warning("Debuff扫描失败，继续流程。")
+
+        # Step 5/6: 点击下一步（已确认存在）
+        if not self._stopped():
+            self._ostep("阶段一 [5/6] 下一步")
+            if not self._wait_and_click_image("res/buttons/下一步.png"):
+                return False
+
+        # Step 6/6: 点击空白处继续
+        if not self._stopped():
+            self._ostep("阶段一 [6/6] 点击空白处继续")
+            if not self._wait_and_click_image("res/buttons/点击空白处继续.png"):
                 return False
         return True
 
@@ -327,13 +352,115 @@ class CurrencyWarBot:
     # ------------------------------------------------------------------
 
     def _scan_env_region(self):
-        """识别窗口 Y=490~545 全宽区域，返回 OCRResult 列表。"""
+        """识别投资环境区域，返回 OCRResult 列表。"""
         self._reposition_overlay()
         img = self._shot()
         w, _ = img.size
-        results = self.ocr.recognize_region(img, 0, _ENV_Y, w, _ENV_H)
-        self._mark_ocr(results, target_keywords=_TARGET_ENVS)
+        er = self.config.env_region
+        # env_region.w == 0 表示全宽
+        region_w = er.w if er.w > 0 else w
+        results = self.ocr.recognize_region(img, er.x, er.y, region_w, er.h)
+        self._mark_ocr(results, target_keywords=set(self.config.target_envs))
         return results
+
+    def _match_debuff(self, text: str) -> Optional[str]:
+        """将 OCR 识别文字匹配到已知Debuff名。返回匹配的Debuff名或 None。"""
+        if not self._debuffs:
+            return text
+        text_clean = text.strip()
+        if text_clean in self._debuffs:
+            return text_clean
+        for debuff in self._debuffs:
+            if debuff in text_clean or text_clean in debuff:
+                return debuff
+        return None
+
+    def _validate_debuff_results(self, results: list) -> List[str]:
+        """验证 OCR 结果，将每条文字与 debuff.txt 中的名称对应。返回匹配成功的Debuff名列表。"""
+        matched: List[str] = []
+        for r in results:
+            name = self._match_debuff(r.text)
+            if name:
+                matched.append(name)
+        return matched
+
+    def _scan_debuff_region(self) -> list:
+        """识别Debuff区域，返回 OCRResult 列表。"""
+        self._reposition_overlay()
+        img = self._shot()
+        dr = self.config.debuff_region
+        results = self.ocr.recognize_region(img, dr.x, dr.y, dr.w, dr.h)
+        highlight_kw = set(self.config.unwanted_debuffs) | set(self.config.wanted_buffs)
+        self._mark_ocr(results, target_keywords=highlight_kw if highlight_kw else None)
+        return results
+
+    # Debuff 数量范围
+    _DEBUFF_MIN: int = 1
+    _DEBUFF_MAX: int = 4
+
+    def _stable_scan_debuffs(self) -> List[str]:
+        """
+        对Debuff区域进行稳定扫描：连续 min_confirm_rounds 次识别出相同的1~4个已知Debuff时返回结果。
+
+        :returns: 已验证的Debuff名称列表，或空列表
+        """
+        min_rounds = self.config.min_confirm_rounds
+        max_attempts = self.config.max_confirm_attempts
+        self._ostep("阶段一 [4/6] 稳定扫描Debuff…")
+        logger.info("开始稳定扫描Debuff：至少 %d 次连续比对…", min_rounds)
+        consecutive = 0
+        last_names: Optional[tuple] = None
+
+        for attempt in range(1, max_attempts + 1):
+            if self._stopped():
+                return []
+
+            results = self._scan_debuff_region()
+            debuff_names = self._validate_debuff_results(results)
+            current_names = tuple(sorted(debuff_names))
+            count = len(debuff_names)
+            valid_count = self._DEBUFF_MIN <= count <= self._DEBUFF_MAX
+
+            if valid_count and current_names == last_names:
+                consecutive += 1
+                msg = f"Debuff比对#{attempt} {current_names} ✓ ({consecutive}/{min_rounds})"
+                logger.info("  %s", msg)
+                self._olog(msg)
+            else:
+                consecutive = 1 if valid_count else 0
+                if valid_count:
+                    msg = f"Debuff比对#{attempt} {current_names} (新组合 1/{min_rounds})"
+                else:
+                    msg = f"Debuff比对#{attempt} 识别{count}个(需{self._DEBUFF_MIN}~{self._DEBUFF_MAX}): {debuff_names}"
+                logger.info("  %s", msg)
+                self._olog(msg)
+
+            last_names = current_names
+
+            if consecutive >= min_rounds:
+                debuff_list = list(current_names)
+                msg = f"Debuff扫描完成：{debuff_list}"
+                logger.info("Debuff稳定扫描完成：连续 %d 次确认 %s", min_rounds, debuff_list)
+                self._olog(msg)
+
+                # 标注想要/不想要
+                wanted_found = [d for d in debuff_list if d in self.config.wanted_buffs]
+                unwanted_found = [d for d in debuff_list if d in self.config.unwanted_debuffs]
+                if wanted_found:
+                    self._olog(f"✓ 想要的Debuff: {wanted_found}")
+                    logger.info("想要的Debuff: %s", wanted_found)
+                if unwanted_found:
+                    self._olog(f"⚠ 不想要的Debuff: {unwanted_found}")
+                    logger.warning("不想要的Debuff: %s", unwanted_found)
+
+                return debuff_list
+
+            time.sleep(_POLL)
+
+        self._olog(f"Debuff稳定扫描失败：未能确认{self._DEBUFF_MIN}~{self._DEBUFF_MAX}个Debuff")
+        logger.warning("Debuff稳定扫描失败：%d 次尝试内未能连续 %d 次确认",
+                        max_attempts, min_rounds)
+        return []
 
     def _match_strategy(self, text: str) -> Optional[str]:
         """将 OCR 识别文字匹配到合法策略名。返回匹配的策略名或 None。"""
@@ -362,19 +489,21 @@ class CurrencyWarBot:
                 validated.append(r)
         return validated
 
-    def _stable_scan_env(self, min_rounds: int = _MIN_CONFIRM_ROUNDS) -> list:
+    def _stable_scan_env(self, expected_count: int = 3) -> list:
         """
-        对屏幕进行至少 min_rounds 次 OCR 比对。
-        当连续 min_rounds 次都从全图中识别出相同的3个合法策略时返回结果。
+        对屏幕进行至少 min_confirm_rounds 次 OCR 比对。
+        当连续确认出相同的 expected_count 个合法策略时返回结果。
 
-        :returns: 验证通过的 OCRResult 列表（3个），或空列表
+        :param expected_count: 期望识别到的策略数量（普通=3，蓝海后=1）
+        :returns: 验证通过的 OCRResult 列表，或空列表
         """
+        min_rounds = self.config.min_confirm_rounds
+        max_attempts = self.config.max_confirm_attempts
         self._ostep("阶段二 稳定扫描投资策略…")
-        logger.info("开始稳定扫描：至少 %d 次连续比对…", min_rounds)
+        logger.info("开始稳定扫描：至少 %d 次连续比对（期望%d个）…", min_rounds, expected_count)
         consecutive = 0
         last_names: Optional[tuple] = None
         last_validated: list = []
-        max_attempts = min_rounds * 5
 
         for attempt in range(1, max_attempts + 1):
             if self._stopped():
@@ -384,20 +513,20 @@ class CurrencyWarBot:
             validated = self._validate_env_results(results)
             current_names = tuple(sorted(r.matched_strategy for r in validated))
 
-            if len(validated) == 3 and current_names == last_names:
+            if len(validated) == expected_count and current_names == last_names:
                 consecutive += 1
                 msg = f"比对#{attempt} {current_names} ✓ ({consecutive}/{min_rounds})"
                 logger.info("  %s", msg)
                 self._olog(msg)
             else:
-                consecutive = 1 if len(validated) == 3 else 0
-                if len(validated) == 3:
+                consecutive = 1 if len(validated) == expected_count else 0
+                if len(validated) == expected_count:
                     msg = f"比对#{attempt} {current_names} (新组合 1/{min_rounds})"
                     logger.info("  %s", msg)
                     self._olog(msg)
                 else:
                     names = [r.matched_strategy for r in validated]
-                    msg = f"比对#{attempt} 识别{len(validated)}个: {names}"
+                    msg = f"比对#{attempt} 识别{len(validated)}个(需{expected_count}): {names}"
                     logger.info("  %s", msg)
                     self._olog(msg)
 
@@ -412,16 +541,17 @@ class CurrencyWarBot:
 
             time.sleep(_POLL)
 
-        self._olog("稳定扫描失败：未能确认3个策略")
-        logger.warning("稳定扫描失败：%d 次尝试内未能连续 %d 次确认相同的3个策略",
-                        max_attempts, min_rounds)
+        self._olog(f"稳定扫描失败：未能确认{expected_count}个策略")
+        logger.warning("稳定扫描失败：%d 次尝试内未能连续 %d 次确认相同的%d个策略",
+                        max_attempts, min_rounds, expected_count)
         return []
 
     def _find_target_env(self, results: list):
         """从 OCR 结果中查找第一个目标投资环境，返回 OCRResult 或 None。"""
+        target_envs = set(self.config.target_envs)
         for r in results:
             strategy = getattr(r, "matched_strategy", r.text)
-            for keyword in _TARGET_ENVS:
+            for keyword in target_envs:
                 if keyword in strategy:
                     return r
         return None
@@ -497,17 +627,48 @@ class CurrencyWarBot:
                     time.sleep(_STEP_DELAY)
                     self._wait_and_click_image("res/buttons/确认.png", timeout=_TIMEOUT_SHORT)
                     return strategy
-            self._olog("刷新后仍未找到目标，随机选择")
-            logger.info("刷新后：仍未找到目标环境，将随机选择。")
+            self._olog("刷新后仍未找到目标")
+            logger.info("刷新后：仍未找到目标环境。")
         else:
             self._olog("未找到刷新按钮，随机选择")
             logger.info("未找到刷新按钮，直接随机选择。")
 
-        # ── 随机选择 ────────────────────────────────────────────────────
+        # ── 蓝海优先 / 随机选择 ─────────────────────────────────────────
         if not validated and refreshed:
             validated = self._stable_scan_env() or validated
 
         if validated:
+            # 刷新后无目标时，优先选择蓝海
+            if refreshed:
+                lanhai = None
+                for r in validated:
+                    strategy = getattr(r, "matched_strategy", r.text)
+                    if "蓝海" in strategy:
+                        lanhai = r
+                        break
+                if lanhai:
+                    strategy = getattr(lanhai, "matched_strategy", lanhai.text)
+                    self._ostep(f"阶段二 优先选择蓝海：{strategy}")
+                    self._olog(f"优先选择蓝海：{strategy}")
+                    logger.info("优先选择蓝海投资环境：%r", strategy)
+                    time.sleep(_CLICK_DELAY)
+                    self.window.click(*lanhai.center)
+                    time.sleep(_STEP_DELAY)
+                    self._wait_and_click_image("res/buttons/确认.png", timeout=_TIMEOUT_SHORT)
+                    # 蓝海额外处理：多一次投资环境文字识别（仅1个）+ 点击策略 + 确认
+                    self._olog("蓝海额外确认：扫描投资环境…")
+                    lanhai_validated = self._stable_scan_env(expected_count=1)
+                    if lanhai_validated:
+                        chosen_env = lanhai_validated[0]
+                        self._olog(f"蓝海：点击投资策略 {getattr(chosen_env, 'matched_strategy', chosen_env.text)}")
+                        logger.info("蓝海：点击投资策略 %r  坐标=%s",
+                                    getattr(chosen_env, "matched_strategy", chosen_env.text), chosen_env.center)
+                        time.sleep(_CLICK_DELAY)
+                        self.window.click(*chosen_env.center)
+                        time.sleep(_STEP_DELAY)
+                    self._wait_and_click_image("res/buttons/确认.png", timeout=_TIMEOUT_SHORT)
+                    return strategy
+
             chosen = random.choice(validated)
             strategy = getattr(chosen, "matched_strategy", chosen.text)
             self._ostep(f"阶段二 随机选择：{strategy}")
@@ -562,12 +723,13 @@ class CurrencyWarBot:
         启动自动化主循环（阻塞）。
 
         终止条件：
-          - 找到目标投资环境（长线利好 / 轮岗）→ 提醒用户后退出
-          - 用户按下 DEL 键
+          - 找到目标投资环境 → 提醒用户后退出
+          - 用户按下停止热键
         """
         self._stop_event.clear()
-        keyboard.add_hotkey("delete", self.stop)
-        logger.info("★ 自动化启动 —— 按 DEL 键随时停止 ★")
+        stop_key = self.config.stop_hotkey
+        keyboard.add_hotkey(stop_key, self.stop)
+        logger.info("★ 自动化启动 —— 按 %s 键随时停止 ★", stop_key)
 
         # 启动覆盖层
         self._init_overlay()
@@ -593,6 +755,25 @@ class CurrencyWarBot:
                 if self._stopped():
                     break
 
+                # ── Debuff 检查：不想要的出现 / 想要的未出现 → 标记后续强制阶段三 ──
+                debuff_bad = False
+                if self._last_debuffs:
+                    unwanted = set(self.config.unwanted_debuffs)
+                    wanted = set(self.config.wanted_buffs)
+                    found_unwanted = [d for d in self._last_debuffs if d in unwanted]
+                    missing_wanted = [d for d in wanted if d not in self._last_debuffs] if wanted else []
+                    if found_unwanted:
+                        self._olog(f"⚠ 不想要的Debuff出现：{found_unwanted}")
+                        logger.info("不想要的Debuff %s 出现。", found_unwanted)
+                        debuff_bad = True
+                    if missing_wanted:
+                        self._olog(f"⚠ 想要的Debuff未出现：{missing_wanted}")
+                        logger.info("想要的Debuff %s 未出现。", missing_wanted)
+                        debuff_bad = True
+
+                if self._stopped():
+                    break
+
                 # 阶段二
                 selected_env = self._phase2()
 
@@ -605,7 +786,15 @@ class CurrencyWarBot:
                     logger.warning("未能选择投资环境，终止。")
                     break
 
-                is_target = any(kw in selected_env for kw in _TARGET_ENVS)
+                # Debuff 不满足条件 → 无论选了什么环境都退出重置
+                if debuff_bad:
+                    self._olog(f"Debuff不满足条件，选了 [{selected_env}] 但仍退出重置")
+                    logger.info("Debuff不满足条件，投资环境 %r 被放弃，执行退出重置…", selected_env)
+                    self._phase3_exit()
+                    continue
+
+                target_envs = set(self.config.target_envs)
+                is_target = any(kw in selected_env for kw in target_envs)
                 if is_target:
                     self._ostep(f"★ 目标达成：{selected_env}")
                     self._olog(f"★ 目标达成：{selected_env}")
@@ -621,7 +810,7 @@ class CurrencyWarBot:
             if self.overlay:
                 self.overlay.stop()
             try:
-                keyboard.remove_hotkey("delete")
+                keyboard.remove_hotkey(stop_key)
             except Exception:
                 pass
             logger.info("自动化已停止。")

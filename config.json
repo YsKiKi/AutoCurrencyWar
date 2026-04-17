@@ -1,0 +1,28 @@
+{
+  "target_envs": [
+    "特邀专家：停云",
+    "深井角斗场"
+  ],
+  "unwanted_debuffs": [
+    "雷之熄火",
+    "第一位面强化",
+    "第三位面强化",
+    "第二位面强化"
+  ],
+  "wanted_buffs": [],
+  "min_confirm_rounds": 5,
+  "max_confirm_attempts": 25,
+  "env_region": {
+    "x": 316,
+    "y": 502,
+    "w": 1924,
+    "h": 41
+  },
+  "debuff_region": {
+    "x": 322,
+    "y": 1274,
+    "w": 1206,
+    "h": 74
+  },
+  "stop_hotkey": "delete"
+}

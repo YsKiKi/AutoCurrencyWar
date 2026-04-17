@@ -13,3 +13,6 @@ paddleocr>=3.0.0
 
 # 热键监听
 keyboard>=0.13.5
+
+# GUI
+PyQt6>=6.5.0
