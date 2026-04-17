@@ -18,7 +18,6 @@ def main():
         "--name", "CurrencyWar",
         # 打包资源文件
         "--add-data", "res;res",
-        "--add-data", "config.json;.",
         # 入口
         "main.py",
     ]
