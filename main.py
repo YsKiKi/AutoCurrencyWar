@@ -95,14 +95,16 @@ def main_gui() -> None:
     _state = {"window": None, "ocr": None, "matcher": None, "bot": None, "thread": None}
 
     def _screenshot_fn():
-        if _state["window"]:
-            return _state["window"].screenshot(client_only=True)
-        # 尝试临时连接窗口截图
-        from core.window import WindowController
-        tmp = WindowController("StarRail.exe")
-        if tmp.find_window():
-            return tmp.screenshot(client_only=True)
-        raise RuntimeError("未找到 StarRail.exe 窗口")
+        import time as _t
+        wc = _state["window"]
+        if not wc:
+            from core.window import WindowController
+            wc = WindowController("StarRail.exe")
+            if not wc.find_window():
+                raise RuntimeError("未找到 StarRail.exe 窗口")
+        wc.focus_window()
+        _t.sleep(0.3)
+        return wc.screenshot(client_only=True)
 
     def _on_start(config: AppConfig):
         if not _state["window"]:
